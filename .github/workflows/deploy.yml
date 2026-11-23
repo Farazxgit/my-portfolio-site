@@ -1,0 +1,101 @@
+name: Build and deploy portfolio
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, Linux, X64, F]
+    timeout-minutes: 30
+    env:
+      IMAGE: portfolio:${{ github.sha }}
+      CONTAINER: faraz-portfolio
+      APP_PORT: ${{ vars.APP_PORT || '3000' }}
+      SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check server configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker info > /dev/null
+          if [[ ! "$SITE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+            echo 'Set repository variable NEXT_PUBLIC_SITE_URL to your public URL (e.g. http://EC2_PUBLIC_IP:3000).'
+            exit 1
+          fi
+          if [[ ! "$APP_PORT" =~ ^[0-9]+$ ]] || (( APP_PORT < 1 || APP_PORT > 65535 )); then
+            echo 'APP_PORT must be a port from 1 to 65535.'
+            exit 1
+          fi
+
+      - name: Lint, typecheck and build Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --build-arg "NEXT_PUBLIC_SITE_URL=$SITE_URL" --tag "$IMAGE" .
+
+      - name: Deploy and verify, restoring previous container on failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="${CONTAINER}-previous"
+          if docker container inspect "$previous" > /dev/null 2>&1; then
+            echo "Container $previous already exists. Inspect it before retrying deployment."
+            exit 1
+          fi
+
+          rollback() {
+            docker logs --tail 100 "$CONTAINER" || true
+            docker rm -f "$CONTAINER" || true
+            if docker container inspect "$previous" > /dev/null 2>&1; then
+              docker rename "$previous" "$CONTAINER"
+              docker start "$CONTAINER"
+            fi
+          }
+          if docker container inspect "$CONTAINER" > /dev/null 2>&1; then
+            docker rename "$CONTAINER" "$previous"
+          fi
+          trap rollback ERR
+          if docker container inspect "$previous" > /dev/null 2>&1; then
+            docker stop "$previous"
+          fi
+
+          docker run -d --name "$CONTAINER" \
+            --restart unless-stopped \
+            --publish "${APP_PORT}:3000" \
+            --log-opt max-size=10m --log-opt max-file=3 \
+            "$IMAGE"
+
+          healthy=false
+          for attempt in {1..30}; do
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")
+            if [[ "$status" == healthy ]]; then
+              healthy=true
+              break
+            fi
+            if [[ "$status" == unhealthy ]]; then break; fi
+            sleep 2
+          done
+          if [[ "$healthy" != true ]]; then
+            echo 'New container failed its health check.'
+            false
+          fi
+          trap - ERR
+          if docker container inspect "$previous" > /dev/null 2>&1; then
+            docker rm "$previous"
+          fi
+          echo "Portfolio deployed successfully on port $APP_PORT."

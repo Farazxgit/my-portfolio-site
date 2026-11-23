@@ -65,6 +65,36 @@ Set an optional `url` to a confirmed HTTPS project address to link both the titl
 
 The supplied portrait is saved at `public/images/faraz-ahmed.png` for future use. It is not rendered, keeping the requested changes limited to Work.
 
+## Deploy to Ubuntu EC2 with Docker and runner F
+
+The workflow in `.github/workflows/deploy.yml` runs on pushes to `master`, or manually through the Actions tab. It targets the runner labels `self-hosted`, `Linux`, `X64`, and `F`. The runner must be installed on the deployment server and its Linux user must be able to run `docker info` without sudo. No Docker Hub account or SSH secrets are needed: the image is built and run directly on that server.
+
+Before the first run:
+
+1. In GitHub, open **Settings → Secrets and variables → Actions → Variables**. Add `NEXT_PUBLIC_SITE_URL` with your public URL, for example `http://YOUR_EC2_PUBLIC_IP:3000` or your HTTPS domain. This value is used during the build for metadata and sitemap URLs.
+2. Optionally add `APP_PORT` to select the host port; it defaults to `3000`. The container always listens on port `3000`.
+3. Allow the selected host port in the EC2 security group and Ubuntu firewall, for the clients that need access. With the default setup, visit `http://YOUR_EC2_PUBLIC_IP:3000`. A domain using HTTPS needs a reverse proxy and TLS configured separately.
+4. Keep Docker and runner `F` running as services so they start after a server reboot. If Docker group membership changes, restart the runner service so it picks up the new permissions.
+5. Push the deployment files to `master`, then watch **Actions → Build and deploy portfolio**.
+
+The multi-stage Dockerfile installs locked dependencies and runs lint, TypeScript checks, and the production build. It uses Next.js standalone output and runs the application as the unprivileged Node user. The workflow builds before stopping the existing app, starts the replacement with `unless-stopped`, and waits for its HTTP health check. It restores the previous container if deployment fails. Replacement causes a short interruption; this is a single-server deployment.
+
+Inspect the app on EC2 with:
+
+```bash
+docker ps --filter name=faraz-portfolio
+docker logs --tail 100 faraz-portfolio
+```
+
+For a manual Docker deployment:
+
+```bash
+docker build --build-arg NEXT_PUBLIC_SITE_URL=http://YOUR_EC2_PUBLIC_IP:3000 -t faraz-portfolio .
+docker run -d --name faraz-portfolio --restart unless-stopped -p 3000:3000 faraz-portfolio
+```
+
+Old Docker images are retained for troubleshooting; monitor server disk usage and remove unused portfolio images when needed. The workflow does not prune other applications' Docker resources. Deployment only runs for `master`; pull requests do not execute on this server.
+
 ## Deploy to Vercel
 
 1. Push this project to a Git repository and import it into Vercel.
